@@ -16,82 +16,55 @@ from cifar10 import CIFAR10
 parser = argparse.ArgumentParser()
 parser.add_argument("--batch_size", default=256, type=int, help="Batch size.")
 parser.add_argument("--debug", default=False, action="store_true", help="If given, run functions eagerly.")
-parser.add_argument("--epochs", default=182, type=int, help="Number of epochs.")
+parser.add_argument("--epochs", default=200, type=int, help="Number of epochs.")
 parser.add_argument("--seed", default=200, type=int, help="Random seed.")
 parser.add_argument("--threads", default=0, type=int, help="Maximum number of threads to use.")
 
 parser.add_argument("--momentum", default=0.9, type=float)
 parser.add_argument("--augment", default='tf_image', type=str)
 parser.add_argument("--learning-rate", default=0.05, type=float)
-parser.add_argument("--layers_num", default=9, type=int)
-parser.add_argument("--init_filt", default=16, type=int)
+parser.add_argument("--initial_filters", default=16, type=int)
+
 
 class Model(tf.keras.Model):
     def __init__(self, args: argparse.Namespace) -> None:
-        self.kernel_size=3
+        self.kernel_size = 3
 
         inputs = tf.keras.layers.Input(shape=[CIFAR10.H, CIFAR10.W, CIFAR10.C])
         layer = inputs
 
-        #Initial Convolution layer
-        starting_filters = args.init_filt
-        layer = tf.keras.layers.Conv2D(filters=starting_filters, kernel_size=3, strides=1, padding='same', use_bias=False,
-                                       kernel_initializer='he_normal', kernel_regularizer=tf.keras.regularizers.l2(1e-4))\
-                                        (layer)
-        layer = tf.keras.layers.BatchNormalization()(layer)
-        layer = tf.keras.layers.Activation(tf.nn.relu)(layer)
-
-        #Residual layers
-
-        for i in range(3):
+        #VGG layers
+        starting_filters = args.initial_filters
+        for i in range(4):
             filter_num = starting_filters * 2**i
-            for j in range(9):
-                if j == 0 and i > 0:
-                    strides = 2
-                else:
-                    strides = 1
-                layer = self.create_resblock(layer, self.kernel_size, filter_num, strides)
+            for j in range(2):
+                layer = tf.keras.layers.Conv2D(filters=filter_num, kernel_size=(3, 3), padding='same',
+                                               kernel_initializer='he_uniform')(layer)
+                layer = tf.keras.layers.BatchNormalization()(layer)
+                layer = tf.keras.layers.Activation(tf.nn.relu)(layer)
 
-        # Do not use average pooling: the network is not deep enough for it
-        layer = tf.keras.layers.GlobalAveragePooling2D()(layer)
+            layer = tf.keras.layers.MaxPool2D(pool_size=(2, 2))(layer)
+
         layer = tf.keras.layers.Flatten()(layer)
+        layer = tf.keras.layers.Dense(units=128, activation='relu', kernel_initializer='he_uniform')(layer)
 
         # Add the final output layer
-        outputs = tf.keras.layers.Dense(len(CIFAR10.LABELS), activation=tf.nn.softmax, kernel_initializer="he_normal")(layer)
+        outputs = tf.keras.layers.Dense(len(CIFAR10.LABELS), activation=tf.nn.softmax)(layer)
 
         super().__init__(inputs=inputs, outputs=outputs)
 
-        """steps = 45000 / args.batch_size * args.epochs
-        la = 0.1
-        ela = 0.001
-        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(la, steps, alpha=ela / la, name=None)"""
+        steps = 45000 // args.batch_size * args.epochs
+        la = args.learning_rate
+        ela = 0.0005
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(la, steps, alpha=ela/la, name=None)
 
         self.compile(
-            optimizer=tf.optimizers.SGD(learning_rate=args.learning_rate, momentum=args.momentum),
+            optimizer=tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=args.momentum),
             loss=tf.losses.SparseCategoricalCrossentropy(),
             metrics=[tf.metrics.SparseCategoricalAccuracy(name="accuracy")],
         )
         self.tb_callback = tf.keras.callbacks.TensorBoard(args.logdir)
 
-    def create_resblock(self, layer, kernelsize, filters, strides=1):
-        original_layer = layer
-        fx = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernelsize, strides=strides, padding='same', use_bias=False,
-                                    kernel_initializer="he_normal", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(
-            layer)
-        fx = tf.keras.layers.BatchNormalization()(fx)
-        fx = tf.keras.layers.Activation(tf.nn.relu)(fx)
-        fx = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernelsize, strides=1, padding='same', use_bias=False,
-                                    kernel_initializer="he_normal", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(
-            fx)
-        fx = tf.keras.layers.BatchNormalization()(fx)
-
-        if strides > 1:
-            # Do the 1x1 convolution
-            original_layer = tf.keras.layers.Conv2D(filters=filters, kernel_size=1, strides=strides)(original_layer)
-        out = tf.keras.layers.Add()([original_layer, fx])
-        out = tf.nn.relu(out)
-
-        return out
 
 
 def main(args: argparse.Namespace) -> None:
@@ -112,10 +85,6 @@ def main(args: argparse.Namespace) -> None:
 
     # Load data
     cifar = CIFAR10()
-
-    model = Model(args)
-    model.summary()
-    #tf.keras.utils.plot_model(model)
 
     train = tf.data.Dataset.from_tensor_slices((cifar.train.data['images'], cifar.train.data['labels']))
     dev = tf.data.Dataset.from_tensor_slices((cifar.dev.data['images'], cifar.dev.data['labels']))
@@ -149,10 +118,10 @@ def main(args: argparse.Namespace) -> None:
         return image, label
 
     train = train.map(image_to_float)
-    train = train.shuffle(len(cifar.train.data['labels']))
-    #train = train.map(train_augment_tf_image)
-    train = train.map(train_augment_layers)
 
+    train = train.shuffle(len(train))
+    train = train.map(train_augment_tf_image)
+    #train = train.map(train_augment_layers)
     train = train.batch(args.batch_size)
     train.prefetch(tf.data.AUTOTUNE)
 
@@ -160,28 +129,26 @@ def main(args: argparse.Namespace) -> None:
     dev = dev.batch(args.batch_size)
     dev = dev.prefetch(tf.data.AUTOTUNE)
 
-    earlystopping = tf.keras.callbacks.EarlyStopping(monitor="val_loss", mode="min", patience=10, restore_best_weights=True)
+    model = Model(args)
+    model.summary()
 
+    earlystopping = tf.keras.callbacks.EarlyStopping(monitor="val_loss", mode="min", patience=6, restore_best_weights=True)
+
+    lr_drop = 10
     def lr_scheduler(epoch):
-        if epoch > args.epochs * 3 / 4:
-            return 0.001
-        if epoch > args.epochs / 2:
-            return 0.01
-        else:
-            return args.learning_rate
-
+        return args.learning_rate * (10 ** (-(epoch // lr_drop)))
     lr_schedule = tf.keras.callbacks.LearningRateScheduler(lr_scheduler)
 
-    model.fit(
+    logs = model.fit(
         train,
         batch_size=args.batch_size, epochs=args.epochs,
         validation_data=dev,
-        callbacks=[model.tb_callback, lr_schedule]
+        callbacks=[model.tb_callback]
     )
 
     # Generate test set annotations, but in `args.logdir` to allow parallel execution.
     os.makedirs(args.logdir, exist_ok=True)
-    model.save(os.path.join(args.logdir, 'ResNet56_layers_bs256'))
+    model.save(os.path.join(args.logdir, 'VGG_tfimg_bs256'))
     with open(os.path.join(args.logdir, "cifar_competition_test.txt"), "w", encoding="utf-8") as predictions_file:
         test = np.array([tf.image.convert_image_dtype(x, tf.float32) for x in cifar.test.data['images']])
         for probs in model.predict(test, batch_size=args.batch_size):
