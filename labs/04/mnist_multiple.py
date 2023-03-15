@@ -13,9 +13,9 @@ from mnist import MNIST
 
 parser = argparse.ArgumentParser()
 # These arguments will be set appropriately by ReCodEx, even if you change them.
-parser.add_argument("--batch_size", default=50, type=int, help="Batch size.")
+parser.add_argument("--batch_size", default=100, type=int, help="Batch size.")
 parser.add_argument("--debug", default=False, action="store_true", help="If given, run functions eagerly.")
-parser.add_argument("--epochs", default=5, type=int, help="Number of epochs.")
+parser.add_argument("--epochs", default=1, type=int, help="Number of epochs.")
 parser.add_argument("--recodex", default=False, action="store_true", help="Evaluation in ReCodEx.")
 parser.add_argument("--seed", default=42, type=int, help="Random seed.")
 parser.add_argument("--threads", default=1, type=int, help="Maximum number of threads to use.")
@@ -37,6 +37,16 @@ class Model(tf.keras.Model):
         # - flattening layer,
         # - fully connected layer with 200 neurons and ReLU activation,
         # obtaining a 200-dimensional feature vector FV of each image.
+        hidden_layers = [tf.keras.layers.Conv2D(filters=10, kernel_size=3, strides=2, padding='valid', activation=tf.nn.relu),
+                  tf.keras.layers.Conv2D(filters=20, kernel_size=3, strides=2, padding='valid', activation=tf.nn.relu),
+                  tf.keras.layers.Flatten(),
+                  tf.keras.layers.Dense(200, activation='relu')]
+
+        ls = [images[0], images[1]]
+        for layer in hidden_layers:
+            ls[0] = layer(ls[0])
+            ls[1] = layer(ls[1])
+
 
         # TODO: Using the computed representations, the model should produce four outputs:
         # - first, compute _direct comparison_ whether the first digit is
@@ -51,11 +61,23 @@ class Model(tf.keras.Model):
         # - finally, compute _indirect comparison_ whether the first digit
         #   is greater than second, by comparing the predictions from the above
         #   two outputs.
+        concatenation = tf.keras.layers.Concatenate()([ls[0], ls[1]])
+        dense = tf.keras.layers.Dense(units=200, activation=tf.nn.relu)(concatenation)
+        direct_comparison = tf.keras.layers.Dense(1, activation=tf.nn.sigmoid)(dense)
+
+        dense_10_classes = tf.keras.layers.Dense(10, activation=tf.nn.softmax)
+        out_1 = dense_10_classes(ls[0])
+        out_2 = dense_10_classes(ls[1])
+
+        dig_1 = tf.argmax(out_1, axis=1)
+        dig_2 = tf.argmax(out_2, axis=1)
+        indirect_comparison = tf.greater(dig_1, dig_2)
+
         outputs = {
-            "direct_comparison": ...,
-            "digit_1": ...,
-            "digit_2": ...,
-            "indirect_comparison": ...,
+            "direct_comparison": direct_comparison,
+            "digit_1": out_1,
+            "digit_2": out_2,
+            "indirect_comparison": indirect_comparison,
         }
 
         # Finally, construct the model.
@@ -72,16 +94,17 @@ class Model(tf.keras.Model):
         # the accuracy of both the direct and indirect comparisons should be
         # computed; name both metrics "accuracy" (i.e., pass "accuracy" as the
         # first argument of the metric object).
+
         self.compile(
             optimizer=tf.keras.optimizers.Adam(jit_compile=False),
             loss={
-                "direct_comparison": ...,
-                "digit_1": ...,
-                "digit_2": ...,
+                "direct_comparison": tf.losses.BinaryCrossentropy(),
+                "digit_1": tf.losses.SparseCategoricalCrossentropy(),
+                "digit_2": tf.losses.SparseCategoricalCrossentropy(),
             },
             metrics={
-                "direct_comparison": [...],
-                "indirect_comparison": [...],
+                "direct_comparison": [tf.metrics.BinaryAccuracy('accuracy')],
+                "indirect_comparison": [tf.metrics.BinaryAccuracy('accuracy')],
             },
         )
         self.tb_callback = tf.keras.callbacks.TensorBoard(args.logdir)
@@ -94,19 +117,27 @@ class Model(tf.keras.Model):
         dataset = tf.data.Dataset.from_tensor_slices((mnist_dataset.data["images"], mnist_dataset.data["labels"]))
 
         # TODO: If `training`, shuffle the data with `buffer_size=10000` and `seed=args.seed`.
-
+        if training:
+            dataset = dataset.shuffle(buffer_size=10000, seed=args.seed)
         # TODO: Combine pairs of examples by creating batches of size exactly 2.
-
+        dataset = dataset.batch(batch_size=2)
         # TODO: Map pairs of images to elements suitable for our model. Notably,
         # the elements should be pairs `(input, output)`, with
         # - `input` being a pair of images,
         # - `output` being a dictionary with keys "digit_1", "digit_2", "direct_comparison",
         #   and "indirect_comparison".
         def create_element(images, labels):
-            ...
+            inp = (images[0], images[1])
+            outp = {}
+            outp['direct_comparison'] = labels[0] > labels[1]
+            outp['digit_1'] = labels[0]
+            outp['digit_2'] = labels[1]
+            outp['indirect_comparison'] = labels[0] > labels[1]
+            return inp, outp
         dataset = dataset.map(create_element)
 
         # TODO: Create batches of size `args.batch_size`
+        dataset = dataset.batch(batch_size=args.batch_size)
 
         return dataset
 
@@ -133,6 +164,7 @@ def main(args: argparse.Namespace) -> Dict[str, float]:
     # Create the model
     model = Model(args)
 
+    #tf.keras.utils.plot_model(model)
     # Construct suitable datasets from the MNIST data.
     train = model.create_dataset(mnist.train, args, training=True)
     dev = model.create_dataset(mnist.dev, args)

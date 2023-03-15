@@ -84,13 +84,41 @@ def main(args: argparse.Namespace) -> Dict[str, float]:
     #   in `model.optimizer._learning_rate` if needed), so after training, the learning rate
     #   should be close to `args.learning_rate_final` (not equal, because
     #   `model.optimizer.learning_rate` returns the last learning rate used during training).
-    #
-    # Note that since TF 2.11, all optimizers from `tf.optimizers` module perform JIT compilation
-    # on a GPU using XLA. However, that requires XLA to be configured properly. You can avoid
-    # the JIT compilation by passing `jit_compile=False` to the optimizer constructor.
+    if args.decay:
+        la = args.learning_rate
+        steps = mnist.train.size / args.batch_size * args.epochs
+        ela = args.learning_rate_final
+        if args.decay == 'linear':
+            decay = tf.optimizers.schedules.PolynomialDecay(initial_learning_rate=la,
+                                                            decay_steps=steps,
+                                                            end_learning_rate=ela,
+                                                            power=1.0)
+        elif args.decay == 'exponential':
+            rate = ela / la
+            decay = tf.optimizers.schedules.ExponentialDecay(initial_learning_rate=la,
+                                                             decay_steps=steps,
+                                                             decay_rate=rate)
+        else:
+            alpha = ela / la
+            decay = tf.optimizers.schedules.CosineDecay(initial_learning_rate=la,
+                                                        decay_steps=steps,
+                                                        alpha=alpha)
+    else:
+        decay = args.learning_rate
+
+    if args.optimizer == 'SGD':
+        if args.momentum:
+            optimizer = tf.optimizers.SGD(learning_rate=decay,
+                                          momentum=args.momentum,
+                                          nesterov=True)
+        else:
+            optimizer = tf.optimizers.SGD(learning_rate=decay)
+    else:
+        optimizer = tf.optimizers.Adam(learning_rate=decay)
+
 
     model.compile(
-        optimizer=...,
+        optimizer=optimizer,
         loss=tf.losses.SparseCategoricalCrossentropy(),
         metrics=[tf.metrics.SparseCategoricalAccuracy("accuracy")],
     )
